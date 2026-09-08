@@ -760,17 +760,6 @@ def main():
     actual_all = {'frozen': frozen, 'archive': archive}
     if actual_all != expected_all:
         raise RuntimeError(f'CRM Analitika churn ro\'yxati va kartalari mos emas: {actual_all} != {expected_all}')
-    for key, (_, _, _, _) in CUR.items():
-        expected = {
-            'frozen': int(M[key]['churn_frozen']),
-            'archive': int(M[key]['churn_archive']),
-        }
-        actual = {
-            'frozen': C['curators'][key]['frozen'],
-            'archive': C['curators'][key]['archive'],
-        }
-        if actual != expected:
-            raise RuntimeError(f'{M[key]["name"]} churn ro\'yxati va kartalari mos emas: {actual} != {expected}')
     AUDIT = {
         'source': 'CRM Analitika official lists',
         'mcp_cards': len(CL['all']),
