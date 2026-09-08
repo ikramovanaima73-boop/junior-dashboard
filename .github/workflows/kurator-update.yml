@@ -1,6 +1,12 @@
 name: Update Kurator Dashboard
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - "kurator_update.py"
+      - "kurator_rating_template.html"
+      - ".github/workflows/kurator-update.yml"
   schedule:
     - cron: "15 * * * *" # har soatning 15-daqiqasida
   workflow_dispatch:
@@ -53,6 +59,13 @@ jobs:
               raise SystemExit('Invalid churn/base values')
           if churn['frozen'] + churn['archive'] != churn['count']:
               raise SystemExit('Churn breakdown does not match total')
+          crm = data.get('all', {})
+          official = {
+              'frozen': int(crm.get('churn_frozen') or 0),
+              'archive': int(crm.get('churn_archive') or 0),
+          }
+          if {k: int(churn[k]) for k in official} != official:
+              raise SystemExit(f'Churn does not match CRM Analytics: churn={churn}, official={official}')
           expected = round(churn['count'] * 100 / churn['base'], 2)
           if abs(expected - float(churn['pct'])) > 0.02:
               raise SystemExit(f'Invalid churn percent: {churn}')

@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Kurator Tahlili — CRM Analitika modulidan jonli ma'lumot yig'ib, kurator.html ni yangilaydi.
-Manba: crm.junior-it.uz Analitika AJAX API. Login: .crm_login (phone / pass).
-Haftalik churn hodisalari: junior-lms MCP (student_status_logs).
+Manba: crm.junior-it.uz Analitika AJAX API va rasmiy o'quvchi ro'yxatlari.
+Haftalik churn sanalari uchun junior-lms MCP qo'shimcha manba sifatida ishlatiladi.
 Deploy: GitHub Pages (kurator.html)."""
 import os, re, json, base64, pathlib, urllib.request, urllib.parse, http.cookiejar, time, datetime, calendar
+from html import unescape
+from html.parser import HTMLParser
 
 HOME = pathlib.Path.home() / 'junior-dashboard'
 REPO = 'UmarovAhmadjon/junior-dashboard'
@@ -430,6 +432,152 @@ def churn_student_rows(admin_ids_list, weeks):
                            'kind':r['kind'], 'date':date, 'wk':week}
     return {(row['admin'], sid):{k:v for k,v in row.items() if k!='admin'} for sid,row in latest.items()}
 
+class StudentTableParser(HTMLParser):
+    """CRM student-list jadvalidan ID, ism, ustunlar va paginationni oladi."""
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.rows = []
+        self.page_links = set()
+        self.in_row = False
+        self.in_cell = False
+        self.in_student_link = False
+        self.cells = []
+        self.cell_parts = []
+        self.student_id = None
+        self.student_name = []
+
+    def handle_starttag(self, tag, attrs):
+        attrs = dict(attrs)
+        if tag == 'tr':
+            self.in_row = True
+            self.cells = []
+            self.student_id = None
+            self.student_name = []
+        elif tag == 'td' and self.in_row:
+            self.in_cell = True
+            self.cell_parts = []
+        elif tag == 'a':
+            href = unescape(attrs.get('href', ''))
+            detail = re.search(r'/account/student_list/detail/(\d+)', href)
+            if self.in_row and detail:
+                self.student_id = int(detail.group(1))
+                self.in_student_link = True
+            if 'page_action=' in href and re.search(r'[?&]p=\d+', href):
+                self.page_links.add(href)
+
+    def handle_endtag(self, tag):
+        if tag == 'a':
+            self.in_student_link = False
+        elif tag == 'td' and self.in_row:
+            self.cells.append(_clean_html_text(' '.join(self.cell_parts)))
+            self.in_cell = False
+            self.cell_parts = []
+        elif tag == 'tr' and self.in_row:
+            if self.student_id:
+                self.rows.append({
+                    'id': self.student_id,
+                    'name': _clean_html_text(' '.join(self.student_name)),
+                    'cells': list(self.cells),
+                })
+            self.in_row = False
+
+    def handle_data(self, data):
+        if self.in_cell:
+            self.cell_parts.append(data)
+        if self.in_student_link:
+            self.student_name.append(data)
+
+def _clean_html_text(value):
+    return re.sub(r'\s+', ' ', unescape(value or '').replace('\xa0', ' ')).strip()
+
+def parse_student_table(html):
+    parser = StudentTableParser()
+    parser.feed(html)
+    text = _clean_html_text(strip(html))
+    total_match = re.search(r'Jami:\s*([\d\s]+)\s*ta yozuv', text, re.I)
+    total = int(re.sub(r'\D', '', total_match.group(1))) if total_match else None
+    return parser.rows, parser.page_links, total
+
+def page_number(url):
+    match = re.search(r'[?&]p=(\d+)', url)
+    return int(match.group(1)) if match else 0
+
+def crm_student_rows(op, kind, month):
+    """CRM Analitika kartasi ochadigan rasmiy, sahifalangan ro'yxat."""
+    start_url = f'{CRM}/account/student_list/{kind}/{month}'
+    first_html = op.open(start_url, timeout=60).read().decode(errors='ignore')
+    first_rows, page_links, total = parse_student_table(first_html)
+    rows = list(first_rows)
+    seen_pages = set()
+    for href in sorted(page_links, key=page_number):
+        page = page_number(href)
+        if page <= 1 or page in seen_pages:
+            continue
+        seen_pages.add(page)
+        url = urllib.parse.urljoin(CRM, href)
+        page_html = op.open(url, timeout=60).read().decode(errors='ignore')
+        page_rows, _, _ = parse_student_table(page_html)
+        rows.extend(page_rows)
+    unique = {}
+    for row in rows:
+        unique[row['id']] = row
+    rows = list(unique.values())
+    if total is None:
+        raise RuntimeError(f'CRM {kind} ro\'yxati jami sonini topib bo\'lmadi')
+    if len(rows) != total:
+        raise RuntimeError(f'CRM {kind} ro\'yxati to\'liq olinmadi: {len(rows)} / {total}')
+    return rows
+
+def _norm_name(value):
+    return re.sub(r'[^a-z0-9]+', ' ', (value or '').lower()).strip()
+
+def row_admin_id(cells):
+    normalized = {_norm_name(cell) for cell in cells if cell}
+    for _, (name, _, aid, _) in CUR.items():
+        parts = _norm_name(name).split()
+        aliases = {_norm_name(name), ' '.join(reversed(parts)), parts[0], parts[-1]}
+        if normalized & aliases:
+            return aid
+    return None
+
+def row_action_date(cells):
+    for cell in cells:
+        match = re.search(r'(\d{2})\.(\d{2})\.(\d{4})', cell)
+        if match:
+            return f'{match.group(3)}-{match.group(2)}-{match.group(1)}'
+    return None
+
+def official_churn_student_rows(op, admin_ids_list, weeks):
+    """LMS Analitika bilan aynan bir xil Muzlatildi + Ketdi ro'yxati.
+
+    Oylik son va a'zolik CRM Analitika ochadigan rasmiy jadvallardan olinadi.
+    MCP faqat muzlatilganlar sanasini to'ldirish uchun ishlatiladi.
+    """
+    month = weeks[0]['start'][:8] + '01'
+    frozen_rows = crm_student_rows(op, 'frozenStudent', month)
+    left_rows = crm_student_rows(op, 'deleteStudent', month)
+    mcp_rows = churn_student_rows(admin_ids_list, weeks)
+    mcp_by_id = {row['id']:(aid, row) for (aid, _), row in mcp_rows.items()}
+    latest = {}
+    for kind, source_rows in (('frozen', frozen_rows), ('archive', left_rows)):
+        for raw in source_rows:
+            sid = raw['id']
+            fallback = mcp_by_id.get(sid)
+            aid = row_admin_id(raw['cells']) or (fallback[0] if fallback else None)
+            if aid not in admin_ids_list:
+                raise RuntimeError(f'CRM churn o\'quvchisi kuratori topilmadi: ID {sid}, {raw["name"]}')
+            date = row_action_date(raw['cells']) or (fallback[1]['date'] if fallback else None)
+            if not date or not date.startswith(month[:7]):
+                raise RuntimeError(f'CRM churn sanasi topilmadi: ID {sid}, {raw["name"]}')
+            week = next((w['key'] for w in weeks if date < w['end_exclusive']), weeks[-1]['key'])
+            row = {'admin':aid, 'id':sid, 'name':raw['name'] or f'O\'quvchi #{sid}',
+                   'kind':kind, 'date':date, 'wk':week}
+            previous = latest.get(sid)
+            if previous:
+                raise RuntimeError(f'CRM churn ro\'yxatlarida takroriy student ID: {sid}')
+            latest[sid] = row
+    return {(row['admin'], sid):{k:v for k,v in row.items() if k!='admin'} for sid,row in latest.items()}
+
 def old_snapshots():
     try:
         old = (BASE/'kurator.html').read_text()
@@ -538,7 +686,7 @@ def main():
             "Oxirgi to'g'ri sayt saqlanadi."
         )
     db_new = current_new_counts([v[2] for v in CUR.values()])
-    churn_students = churn_student_rows([v[2] for v in CUR.values()], weeks_meta)
+    churn_students = official_churn_student_rows(op, [v[2] for v in CUR.values()], weeks_meta)
     attendance_groups = group_attendance([v[2] for v in CUR.values()], MONTH)
     E = {}
     for key,(_,_,aid,_) in CUR.items():
@@ -605,8 +753,26 @@ def main():
     base = AUGUST_BASELINE['total'] if MONTH.startswith('2026-08') else int(alld['b'])
     C['all'] = {'count':len(CL['all']),'frozen':frozen,'archive':archive,'other':0,
                 'base':base,'pct':round(len(CL['all'])*100/base,2) if base else 0}
+    expected_all = {
+        'frozen': int(alld['churn_frozen']),
+        'archive': int(alld['churn_archive']),
+    }
+    actual_all = {'frozen': frozen, 'archive': archive}
+    if actual_all != expected_all:
+        raise RuntimeError(f'CRM Analitika churn ro\'yxati va kartalari mos emas: {actual_all} != {expected_all}')
+    for key, (_, _, _, _) in CUR.items():
+        expected = {
+            'frozen': int(M[key]['churn_frozen']),
+            'archive': int(M[key]['churn_archive']),
+        }
+        actual = {
+            'frozen': C['curators'][key]['frozen'],
+            'archive': C['curators'][key]['archive'],
+        }
+        if actual != expected:
+            raise RuntimeError(f'{M[key]["name"]} churn ro\'yxati va kartalari mos emas: {actual} != {expected}')
     AUDIT = {
-        'source': 'CRM database via MCP',
+        'source': 'CRM Analitika official lists',
         'mcp_cards': len(CL['all']),
         'mcp_frozen': frozen,
         'mcp_archive': archive,
