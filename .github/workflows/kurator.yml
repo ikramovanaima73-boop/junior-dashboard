@@ -7,6 +7,7 @@ permissions:
   contents: write
 jobs:
   update:
+    if: vars.CRM_AUTOMATION_ENABLED == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
