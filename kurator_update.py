@@ -8,7 +8,7 @@ from html import unescape
 from html.parser import HTMLParser
 
 HOME = pathlib.Path.home() / 'junior-dashboard'
-REPO = 'UmarovAhmadjon/junior-dashboard'
+REPO = 'ikramovanaima73-boop/junior-dashboard'
 CRM = 'https://crm.junior-it.uz'
 MCP = os.environ.get('JUNIOR_MCP_GATEWAY') or 'https://myclinic.agc.uz/new_junior_mcp.php'
 TASHKENT_NOW = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=5)))

@@ -318,7 +318,7 @@ def deploy_netlify(html_path, sig=None):
     return True
 
 # ================== GitHub Pages avtopublikatsiya ==================
-GH_OWNER = "UmarovAhmadjon"
+GH_OWNER = "ikramovanaima73-boop"
 GH_REPO  = "junior-dashboard"
 GH_TOKEN_FILE = os.path.join(BASE, ".github_token")
 
