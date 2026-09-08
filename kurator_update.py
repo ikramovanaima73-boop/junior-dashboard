@@ -82,6 +82,13 @@ def p_plan(t):
 def p_int(t):
     m = re.search(r'([\d\s]+)', t); return int(m.group(1).replace(' ','')) if m else 0
 
+def p_cashier(t):
+    """`Student Kassa 0 14 607 000 0` ichidan fakt summasini oladi."""
+    tokens = re.findall(r'\d+', t.replace('Student Kassa', '', 1))
+    if len(tokens) >= 3 and tokens[0] == '0' and tokens[-1] == '0':
+        return int(''.join(tokens[1:-1]))
+    return p_int(t.replace('Student Kassa', ''))
+
 def grab(op, admin):
     g = lambda ep: api(op, ep, admin)
     return {
@@ -94,7 +101,7 @@ def grab(op, admin):
         'churn_archive': p_int(g('left-students-cards/center-invite-left-card')),
         'fao': p_plan(g('plan-cards/activate-student-plan-card')),
         'b': p_int(g('top-cards/active-student-card')),
-        'kassa': p_int(g('plan-cards/cashier-plan-card').replace('Student Kassa','')),
+        'kassa': p_cashier(g('plan-cards/cashier-plan-card')),
         'yangi': (p_plan(g('plan-cards/new-student-plan-card')) or [None,0,0])[2],
         'qayta': (p_plan(g('plan-cards/reactivated-student-plan-card')) or [None,0,0])[2],
         'ota': p_status(g('top-cards/active-parent-student-card')),
@@ -675,17 +682,6 @@ def main():
     # Filtrga bog'liq yangi/faollashtirilgan va oylik qarzdorlik rejasi.
     events = period_kpis([v[2] for v in CUR.values()], weeks_meta)
     debt_plan = monthly_debtor_plan([v[2] for v in CUR.values()], MONTH)
-    db_students = current_student_counts([v[2] for v in CUR.values()])
-    # MCP bo'sh yoki qisman javob qaytarsa 0/1 bazali buzilgan saytni yozmaymiz.
-    expected_admins = {v[2] for v in CUR.values()}
-    missing_admins = sorted(expected_admins - set(db_students))
-    implausible = {aid:n for aid,n in db_students.items() if n < 50 or n > 1000}
-    if missing_admins or implausible:
-        raise RuntimeError(
-            f"MCP student bazasi yaroqsiz; missing={missing_admins}, implausible={implausible}. "
-            "Oxirgi to'g'ri sayt saqlanadi."
-        )
-    db_new = current_new_counts([v[2] for v in CUR.values()])
     churn_students = official_churn_student_rows(op, [v[2] for v in CUR.values()], weeks_meta)
     attendance_groups = group_attendance([v[2] for v in CUR.values()], MONTH)
     E = {}
@@ -699,10 +695,18 @@ def main():
                 'qarz_plan': debt_plan.get(aid,0),
             }
         }
-        M[key]['yangi'] = db_new.get(aid,0)
+        # CRM kartasidagi `yangi` — oylik qabul. Hozirgi `Yangi` statusi esa
+        # alohida ko'rsatkich; ikkalasini aralashtirish dashboard sonini buzadi.
+        M[key]['current_new_status'] = int(M[key]['y'][0])
         M[key]['qayta'] = E[key]['month']['fao']
         M[key]['qarz_plan'] = E[key]['month']['qarz_plan']
-        M[key]['db_students'] = db_students.get(aid,0)
+        # Dashboardning asosiy bazasi aynan CRM Analitika kartasidan olinadi.
+        M[key]['db_students'] = int(M[key]['b'])
+        status_total = sum(int(M[key][field][0]) for field in ('a','p','x','y'))
+        if status_total != int(M[key]['b']):
+            raise RuntimeError(
+                f"{key}: CRM baza va statuslar mos emas: {M[key]['b']} != {status_total}"
+            )
     admin_to_key = {aid:key for key,(_,_,aid,_) in CUR.items()}
     CL = {'curators':{key:[] for key in CUR}, 'teams':{'A':[],'B':[]}, 'all':[]}
     for (aid,_), row in churn_students.items():
@@ -750,7 +754,7 @@ def main():
                             'base':base,'pct':round(len(rows)*100/base,2) if base else 0}
     frozen = sum(r['kind'] == 'frozen' for r in CL['all'])
     archive = sum(r['kind'] == 'archive' for r in CL['all'])
-    base = AUGUST_BASELINE['total'] if MONTH.startswith('2026-08') else int(alld['b'])
+    base = sum(x['base'] for x in C['curators'].values())
     C['all'] = {'count':len(CL['all']),'frozen':frozen,'archive':archive,'other':0,
                 'base':base,'pct':round(len(CL['all'])*100/base,2) if base else 0}
     expected_all = {
@@ -780,8 +784,8 @@ def main():
     today = TASHKENT_NOW.strftime('%Y-%m-%d')
     snapshots = old_snapshots()
     snapshots[today] = {
-        'total': sum(db_students.values()),
-        'curators': {key:db_students.get(aid,0) for key,(_,_,aid,_) in CUR.items()},
+        'total': sum(int(M[key]['b']) for key in CUR),
+        'curators': {key:int(M[key]['b']) for key in CUR},
         'group_attendance': {
             'groups': {str(g['id']):{'pct':g['totals']['pct'],'stage':g['stage']} for g in G['groups']}
         }

@@ -5,6 +5,9 @@ import kurator_update as ku
 
 
 class StudentTableParserTest(unittest.TestCase):
+    def test_cashier_card_uses_fact_amount_only(self):
+        self.assertEqual(ku.p_cashier('Student Kassa 0 14 607 000 0'), 14_607_000)
+
     def test_parses_rows_total_and_pagination(self):
         html = """
         <div>Jami: &nbsp; 2 &nbsp; ta yozuv</div>
